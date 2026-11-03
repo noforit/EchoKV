@@ -1,0 +1,8 @@
+huggingface-hub>=0.34,<1
+PyYAML>=6
+wonderwords==2.2.0
+nltk>=3.8
+requests>=2.31
+beautifulsoup4>=4.12
+html2text>=2024.2.26
+scipy>=1.11

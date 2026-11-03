@@ -3,14 +3,12 @@ import string
 
 import jieba
 from fuzzywuzzy import fuzz
-# import difflib
 
-# from typing import List
+
 from collections import Counter
 from rouge import Rouge
 
 def normalize_answer(s):
-    """Lower text and remove punctuation, articles and extra whitespace."""
 
     def remove_articles(text):
         return re.sub(r"\b(a|an|the)\b", " ", text)
@@ -29,7 +27,6 @@ def normalize_answer(s):
 
 
 def normalize_zh_answer(s):
-    """Lower text and remove punctuation, extra whitespace."""
 
     def white_space_fix(text):
         return "".join(text.split())
@@ -100,7 +97,7 @@ def classification_score(prediction, ground_truth, **kwargs):
     else:
         score = 0.0
     return score
-    
+
 def rouge_score(prediction, ground_truth, **kwargs):
     rouge = Rouge()
     try:
@@ -111,7 +108,7 @@ def rouge_score(prediction, ground_truth, **kwargs):
 
 def rouge_zh_score(prediction, ground_truth, **kwargs):
     prediction = " ".join(list(jieba.cut(prediction, cut_all=False)))
-    ground_truth = " ".join(list(jieba.cut(ground_truth, cut_all=False))) 
+    ground_truth = " ".join(list(jieba.cut(ground_truth, cut_all=False)))
     score = rouge_score(prediction, ground_truth)
     return score
 
@@ -144,10 +141,5 @@ def qa_f1_zh_score(prediction, ground_truth, **kwargs):
     return f1_score(prediction_tokens, ground_truth_tokens)
 
 def string_match_all(preds, refs):
-    """
-    evaluation metric for RULER
-    preds: List[str]
-    refs: List[List[str]]
-    """
     score = sum([sum([1.0 if r.lower() in pred.lower() else 0.0 for r in ref]) / len(ref) for pred, ref in zip(preds, refs)]) / len(preds) * 100
     return round(score, 2)

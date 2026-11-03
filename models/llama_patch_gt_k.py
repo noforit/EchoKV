@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from types import MethodType
-from .echo_partial_mlp import EchoPartialMLP 
+from .echo_mlp import EchoPartialMLP
 from transformers.models.llama.modeling_llama import apply_rotary_pos_emb, eager_attention_forward
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from transformers.cache_utils import Cache, DynamicCache
@@ -18,9 +18,9 @@ from typing import Tuple
 def print_gpu_memory(tag=""):
     if not torch.cuda.is_available():
         return
-    
+
     torch.cuda.synchronize()
-    
+
     allocated = torch.cuda.memory_allocated() / 1024**3
     reserved = torch.cuda.memory_reserved() / 1024**3
     max_allocated = torch.cuda.max_memory_allocated() / 1024**3
@@ -30,15 +30,15 @@ def calculate_storage_memory(past_key_values, gap_storage):
 
     kv_bytes = 0
     gap_bytes = 0
-    
+
     if past_key_values is not None:
-        if hasattr(past_key_values, 'layers'): # DynamicCache
+        if hasattr(past_key_values, 'layers'):
             for layer in past_key_values.layers:
                 if layer.keys is not None:
                     kv_bytes += layer.keys.numel() * layer.keys.element_size()
                 if layer.values is not None:
                     kv_bytes += layer.values.numel() * layer.values.element_size()
-        elif isinstance(past_key_values, (tuple, list)): # Tuple of tuples
+        elif isinstance(past_key_values, (tuple, list)):
             for k, v in past_key_values:
                 kv_bytes += k.numel() * k.element_size()
                 kv_bytes += v.numel() * v.element_size()
@@ -50,7 +50,7 @@ def calculate_storage_memory(past_key_values, gap_storage):
             if 'v' in content and isinstance(content['v'], torch.Tensor):
                 gap_bytes += content['v'].numel() * content['v'].element_size()
 
-    return kv_bytes / 1024**3, gap_bytes / 1024**3  
+    return kv_bytes / 1024**3, gap_bytes / 1024**3
 
 
 class EchoLlamaPartialManager(nn.Module):
@@ -58,21 +58,21 @@ class EchoLlamaPartialManager(nn.Module):
         super().__init__()
         self.model = model
         self.block_size = args.block_size
-        self.is_echo_mode = False 
+        self.is_echo_mode = False
         self.sink_size = getattr(args, 'sink_size', 4)
         self.local_window_size = getattr(args, 'local_window_size', 128)
-        
-        self.total_save_dim = getattr(args, 'total_save_dim', 1024) 
+
+        self.total_save_dim = getattr(args, 'total_save_dim', 1024)
         print(f"EchoPartial Mode: block_size={self.block_size}, total_save_dim={self.total_save_dim}")
 
-        self.training_buffer = {} 
+        self.training_buffer = {}
 
         self.echo_mlps = nn.ModuleList([
             EchoPartialMLP(model.config, total_save_dim=self.total_save_dim, block_size=self.block_size) for _ in range(model.config.num_hidden_layers)
         ]).to(model.dtype)
 
         self.gap_storage = {}
-        
+
         self.is_training = False
         self.original_forwards = {}
         self._apply_patch()
@@ -91,7 +91,7 @@ class EchoLlamaPartialManager(nn.Module):
 
     def set_mode(self, echo_active: bool):
         self.is_echo_mode = echo_active
-        # 清空 Buffer
+
         self.training_buffer = {}
         self.gap_storage = {}
 
@@ -99,39 +99,38 @@ class EchoLlamaPartialManager(nn.Module):
         for i, layer in enumerate(self.model.model.layers):
             original_attn = layer.self_attn
             self.original_forwards[i] = original_attn.forward
-            
+
             layer.self_attn.forward = MethodType(
-                self._create_echo_forward(i, self.echo_mlps[i]), 
+                self._create_echo_forward(i, self.echo_mlps[i]),
                 original_attn
             )
 
 
-            
         transformers.models.llama.modeling_llama.LlamaModel.forward = echo_LlamaModel_forward
 
     def get_anchor_info(self, layer_idx):
 
 
         num_layers = self.model.config.num_hidden_layers
-        
+
         remainder = num_layers % self.block_size
 
         if layer_idx < remainder:
-            return 0, layer_idx 
+            return 0, layer_idx
         adjusted_idx = layer_idx - remainder
-        
+
         block_id_relative = adjusted_idx // self.block_size
 
         anchor_relative = block_id_relative * self.block_size
-        
+
         anchor_idx = anchor_relative + remainder
-        
+
         return block_id_relative, anchor_idx
 
 
     def _create_echo_forward(self, layer_idx, mlp_module):
         manager = self
-        
+
         def echo_forward(
             self_attn_module,
             hidden_states: torch.Tensor,
@@ -141,13 +140,13 @@ class EchoLlamaPartialManager(nn.Module):
             cache_position,
             **kwargs,
         ):
-            # print_gpu_memory(f"Before Echo Attn Layer {layer_idx}")
-            # print(calculate_storage_memory(past_key_values, manager.gap_storage))
+
+
             bsz, q_len, _ = hidden_states.size()
             block_id, anchor_idx = manager.get_anchor_info(layer_idx)
             is_anchor = (layer_idx == anchor_idx)
             if manager.block_size == 1:
-                is_anchor = False 
+                is_anchor = False
 
             input_shape = hidden_states.shape[:-1]
             hidden_shape = (*input_shape, -1, self_attn_module.head_dim)
@@ -157,27 +156,23 @@ class EchoLlamaPartialManager(nn.Module):
             value_states = self_attn_module.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
 
             cos, sin = position_embeddings
-            # query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
-            
+
             final_key_states = key_states
             final_value_states = value_states
-            
+
             S = manager.sink_size
             W = manager.local_window_size
 
             n_heads_keep = manager.total_save_dim // self_attn_module.head_dim
 
-            # print(manager.total_save_dim, self_attn_module.head_dim)
-            # input()
 
-            # prefilling
             if q_len > 1:
-                
+
                 if past_key_values is not None:
 
                     cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-                    
+
                     if is_anchor or not manager.is_echo_mode:
                         key_states, value_states = past_key_values.update(key_states, value_states, self_attn_module.layer_idx, cache_kwargs)
                         final_key_states, final_value_states = key_states, value_states
@@ -187,60 +182,53 @@ class EchoLlamaPartialManager(nn.Module):
                             if W == 0:
                                 v_to_save = value_states[:, :, :S, :]
                                 gap_end = q_len
-                            else:    
-                                # k_to_save = torch.cat([key_states[:, :, :S, :], key_states[:, :, -W:, :]], dim=2)
+                            else:
+
                                 v_to_save = torch.cat([value_states[:, :, :S, :], value_states[:, :, -W:, :]], dim=2)
                                 gap_end = q_len - W
 
                             v_gap_compressed = value_states[:, :, S:gap_end, :].transpose(1,2).reshape(bsz, gap_end - S, -1)[:, :, :manager.total_save_dim].clone()
-                            
+
                             if layer_idx not in manager.gap_storage:
                                 manager.gap_storage[layer_idx] = {}
-                            # manager.gap_storage[layer_idx]['k'] = k_gap_compressed
+
                             manager.gap_storage[layer_idx]['v'] = v_gap_compressed
-                            # del k_gap_compressed, v_gap_compressed
-                            # del key_states, value_states
-                            # torch.cuda.empty_cache()
-                            
+
+
                         else:
-                            # k_to_save = key_states
+
                             v_to_save = value_states
-                        
+
                         k_to_save = key_states
-                        # v_to_save = value_states
 
 
-
-                        
                         if not past_key_values.layers[layer_idx].is_initialized:
                             past_key_values.layers[layer_idx].lazy_initialization(k_to_save)
                         past_key_values.layers[layer_idx].keys = k_to_save
                         past_key_values.layers[layer_idx].values = v_to_save
-                        
+
                 if manager.is_training and not manager.is_echo_mode:
                     if layer_idx not in manager.training_buffer:
                         manager.training_buffer[layer_idx] = {}
-                    
+
                     manager.training_buffer[layer_idx]['k'] = final_key_states.detach()
                     manager.training_buffer[layer_idx]['v'] = final_value_states.detach()
-                    manager.training_buffer[layer_idx]['q'] = query_states.detach() 
-                    
+                    manager.training_buffer[layer_idx]['q'] = query_states.detach()
+
                     manager.training_buffer[layer_idx]['cos'] = cos.detach()
                     manager.training_buffer[layer_idx]['sin'] = sin.detach()
-                    
+
                     manager.training_buffer[layer_idx]['mask'] = attention_mask
-                    
 
 
-            # decoding 阶段
             elif q_len == 1:
                 if past_key_values is not None:
                     cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-                    
+
 
                     key_states, value_states = past_key_values.update(key_states, value_states, self_attn_module.layer_idx, cache_kwargs)
 
-                    
+
                     if is_anchor or not manager.is_echo_mode:
                         final_key_states, final_value_states = key_states, value_states
                     else:
@@ -248,51 +236,47 @@ class EchoLlamaPartialManager(nn.Module):
 
                         has_gap = (layer_idx in manager.gap_storage) and \
                               ('v' in manager.gap_storage[layer_idx])
-                        
+
                         if not has_gap:
                             final_key_states = key_states
                             final_value_states = value_states
 
                         else:
 
-                            # k_sink = key_states[:, :, :S, :]
+
                             v_sink = value_states[:, :, :S, :]
-                            
-                            # k_win_rest = key_states[:, :, S:, :]
+
+
                             v_win_rest = value_states[:, :, S:, :]
-    
+
                             k_gap_partial = None
                             v_gap_partial = manager.gap_storage[layer_idx]['v']
-                            
-                            # bsz, _, gap_len, dim = k_gap_partial.shape
+
+
                             bsz, gap_len, total_dim = v_gap_partial.shape
-                            
+
 
                             if manager.block_size > 1:
-                                # anchor_k_full = past_key_values.layers[anchor_idx].keys
-                                anchor_v_full = past_key_values.layers[anchor_idx].values
-                                
 
-                                # anchor_k_mid = anchor_k_full[:, :, S : S+gap_len, :]
-                                # anchor_v_mid = None
+                                anchor_v_full = past_key_values.layers[anchor_idx].values
+
+
                                 anchor_k_mid = None
                                 anchor_v_mid = anchor_v_full[:, :, S : S+gap_len, :]
                             elif manager.block_size == 1:
                                 anchor_k_mid = None
                                 anchor_v_mid = None
-                            
+
                             rec_k_mid, rec_v_mid = mlp_module.get_projected_kv(
-                                anchor_k_mid, anchor_v_mid, 
+                                anchor_k_mid, anchor_v_mid,
                                 k_gap_partial, v_gap_partial,
                                 self_attn_module
                             )
 
-                            
 
-                            # final_key_states = torch.cat([k_sink, rec_k_mid, k_win_rest], dim=2)
                             final_key_states = key_states
                             final_value_states = torch.cat([v_sink, rec_v_mid, v_win_rest], dim=2)
-                            # final_value_states = value_states
+
 
                             del v_sink
                             del v_win_rest
@@ -300,16 +284,11 @@ class EchoLlamaPartialManager(nn.Module):
                             del anchor_k_mid, anchor_v_mid
 
 
-
-
-
             if query_states.shape[2] == final_key_states.shape[2]:
                 query_states, final_key_states = apply_rotary_pos_emb(query_states, final_key_states, cos, sin)
             elif query_states.shape[2] == 1:
                 query_states = apply_rotary_pos_emb_single(query_states, cos[:,-1:,:], sin[:,-1:,:])
                 final_key_states = apply_rotary_pos_emb_single(final_key_states, cos, sin)
-
-            # query_states, final_key_states = apply_rotary_pos_emb(query_states, final_key_states, cos, sin)
 
 
             attention_interface: Callable = eager_attention_forward
@@ -328,7 +307,7 @@ class EchoLlamaPartialManager(nn.Module):
                 **kwargs,
             )
 
-            
+
             del key_states, value_states, final_key_states, final_value_states
             torch.cuda.empty_cache()
 
@@ -345,37 +324,16 @@ class EchoLlamaPartialManager(nn.Module):
 
 
 def rotate_half(x):
-    """Rotates half the hidden dims of the input."""
     x1 = x[..., : x.shape[-1] // 2]
     x2 = x[..., x.shape[-1] // 2 :]
     return torch.cat((-x2, x1), dim=-1)
 
 
 def apply_rotary_pos_emb_single(x, cos, sin, position_ids=None, unsqueeze_dim=1):
-    """Applies Rotary Position Embedding to the query and key tensors.
-
-    Args:
-        x (`torch.Tensor`): The input tensor.
-        cos (`torch.Tensor`): The cosine part of the rotary embedding.
-        sin (`torch.Tensor`): The sine part of the rotary embedding.
-        position_ids (`torch.Tensor`, *optional*):
-            Deprecated and unused.
-        unsqueeze_dim (`int`, *optional*, defaults to 1):
-            The 'unsqueeze_dim' argument specifies the dimension along which to unsqueeze cos[position_ids] and
-            sin[position_ids] so that they can be properly broadcasted to the dimensions of q and k. For example, note
-            that cos[position_ids] and sin[position_ids] have the shape [batch_size, seq_len, head_dim]. Then, if q and
-            k have the shape [batch_size, heads, seq_len, head_dim], then setting unsqueeze_dim=1 makes
-            cos[position_ids] and sin[position_ids] broadcastable to the shapes of q and k. Similarly, if q and k have
-            the shape [batch_size, seq_len, heads, head_dim], then set unsqueeze_dim=2.
-    Returns:
-        `tuple(torch.Tensor)` comprising of the query and key tensors rotated using the Rotary Position Embedding.
-    """
     cos = cos.unsqueeze(unsqueeze_dim)
     sin = sin.unsqueeze(unsqueeze_dim)
     x_embed = (x * cos) + (rotate_half(x) * sin)
     return x_embed
-
-
 
 
 from transformers.modeling_outputs import BaseModelOutputWithPast
@@ -420,15 +378,8 @@ def echo_LlamaModel_forward(
     )
 
     hidden_states = inputs_embeds
-    # position_embeddings = self.rotary_emb(hidden_states, position_ids)
-    
-    # print(position_ids)
-    # print(cache_position)
-    # print(cache_position[-1])
-    # print(torch.arange(0, cache_position[-1]+1, device=hidden_states.device).unsqueeze(0))
-    # input()
 
-    ## in echo, we use the full position_embeddings
+
     full_position_embeddings = self.rotary_emb(hidden_states, torch.arange(0, cache_position[-1]+1, device=hidden_states.device).unsqueeze(0))
 
     for decoder_layer in self.layers[: self.config.num_hidden_layers]:
@@ -438,7 +389,7 @@ def echo_LlamaModel_forward(
             position_ids=position_ids,
             past_key_values=past_key_values,
             cache_position=cache_position,
-            # position_embeddings=position_embeddings,
+
             position_embeddings=full_position_embeddings,
             **kwargs,
         )

@@ -1,0 +1,20 @@
+{
+  "models": {
+    "llama8b": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+    "mistral7b": "mistralai/Mistral-7B-Instruct-v0.3",
+    "mistral24b": "mistralai/Mistral-Small-24B-Instruct-2501"
+  },
+  "ratios": {
+    "0.7": {"block_size": 2, "total_save_dim": 384},
+    "0.5": {"block_size": 2, "total_save_dim": 0},
+    "0.3": {"block_size": 4, "total_save_dim": 64}
+  },
+  "schedules": {
+    "main": [["kv_mse", 600, 1000], ["o_mse", 1000, 2000]],
+    "kv_only": [["kv_mse", 1000, 1000]],
+    "o_only": [["o_mse", 1000, 1000]],
+    "qk_kl_only": [["qk_kl", 1000, 1000]],
+    "kv_o": [["kv_mse", 700, 700], ["o_mse", 300, 300]],
+    "kv_qk_kl": [["kv_mse", 700, 700], ["qk_kl", 300, 300]]
+  }
+}

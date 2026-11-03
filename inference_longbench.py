@@ -3,19 +3,16 @@ import json
 import os
 import argparse
 from tqdm import tqdm
+from runtime import load_model
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
 import random
 import time
 import numpy as np
 
-# from models.llama_patch_partial import EchoLlamaPartialManager as EchoLlamaManager
+
 from models.llama_patch import EchoLlamaPartialManager as EchoLlamaManager
 from models.mistral_patch import EchoMistralPartialManager as EchoMistralManager
-
-# from models.llama_patch_partial_gt_v import EchoLlamaPartialManager as EchoLlamaManager
-# from models.llama_patch_partial_gt_k import EchoLlamaPartialManager as EchoLlamaManager
-
 
 
 datasets = ["narrativeqa", "qasper", "multifieldqa_en", "hotpotqa", "2wikimqa", "musique", \
@@ -72,13 +69,12 @@ model2prompt = {
 }
 
 
-
 model2maxlen = {
     "llama2": 3950,
     "llama-2": 3950,
 
-    "llama-3.": 130500, # for llama3.1 
-    "llama-3-": 7950, # for llama3
+    "llama-3.": 130500,
+    "llama-3-": 7950,
 
     "mistral": 31500,
     "qwen2.5": 31500,
@@ -102,17 +98,14 @@ def build_chat(prompt, tokenizer, model_path):
 
             ]
     prompt = tokenizer.apply_chat_template(messages,tokenize=False,add_generation_prompt=True)
-    # print(prompt)
-    # input()
+
+
     return prompt
-
-
-
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    
+
     parser.add_argument("--method", type=str, default="echo", choices=["echo", "base"])
 
     parser.add_argument("--model_path", type=str, required=True, help="Base model path")
@@ -127,35 +120,39 @@ def parse_args():
 
     parser.add_argument("--sink_size", type=int, default=4)
     parser.add_argument("--local_window_size", type=int, default=128)
-    
+
     parser.add_argument("--save_dir", type=str, required=True, help="Output file path (.jsonl)")
-    parser.add_argument("--datasets", type=str, nargs='+', choices=[
-        "narrativeqa", "qasper", "multifieldqa_en", "hotpotqa", "2wikimqa", "musique", 
-        "gov_report", "qmsum", "multi_news", "trec", "triviaqa", "samsum", 
+    parser.add_argument("--datasets", type=str, nargs='+', required=True, choices=[
+        "narrativeqa", "qasper", "multifieldqa_en", "hotpotqa", "2wikimqa", "musique",
+        "gov_report", "qmsum", "multi_news", "trec", "triviaqa", "samsum",
         "passage_count", "passage_retrieval_en", "lcc", "repobench-p"
         ], help="List of datasets to choose from")
     parser.add_argument("--temperature", type=float, default=0.0, help="Sampling temperature")
-    parser.add_argument("--data_file", type=str, default="")
+    parser.add_argument("--data_dir", type=str,
+                        default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "LongBench"),
+                        help="Directory containing <dataset>.jsonl files")
+    parser.add_argument("--data_file", type=str, default="",
+                        help="Override the JSONL file when evaluating a single dataset")
     parser.add_argument("--eval_batch_size", type=int, default=1, help="batch size for evaluation.")
 
 
-
-    
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
-    
+    if args.data_file and len(args.datasets) != 1:
+        parser.error("--data_file requires exactly one dataset; use --data_dir for multiple datasets")
+
 
     if args.method == "echo" and not args.mlp_path:
         parser.error("--mlp_path is required when --method is 'echo'")
-        
-    return args
 
+    return args
 
 
 def main(args):
     print("Loading data...")
-    
+
     test_data = []
-    
+
     prompts = []
     inputs = []
     contexts = []
@@ -165,45 +162,47 @@ def main(args):
     languages = []
     all_classess = []
     _ids = []
-    
-    input_max_len = 0
-    
-    model_path = args.model_path.lower()
 
-    
+    input_max_len = 0
+
+    model_path = args.model_path.rstrip("/").lower()
+
+    model_max_len = model.config.max_position_embeddings - dataset2maxlen[args.dataset]
+
+
     for key in model2maxlen:
         if key in model_path:
             model_max_len = model2maxlen[key]
             break
-            
+
     print('model_max_len',model_max_len)
-    
+
     output_max_len = dataset2maxlen[args.dataset]
-    
+
     with open(args.data_file) as fp:
         for line in fp:
             example = json.loads(line)
-            
-            
+
+
             length = example["length"]
             if length > input_max_len: input_max_len = length
-            
+
             template = model2prompt[args.dataset]
             prompt = template.format(**example)
 
-            if args.dataset not in ["trec", "triviaqa", "samsum", "lsht", "lcc", "repobench-p"]: # chat models are better off without build prompts on these tasks
+            if args.dataset not in ["trec", "triviaqa", "samsum", "lsht", "lcc", "repobench-p"]:
                 prompt = build_chat(prompt, tokenizer, args.model_path.lower())
-            
-                
+
+
             example["prompt"] = prompt
-                
+
             test_data.append(example)
-        
+
     print(f"Max Length is {input_max_len}")
-        
+
 
     for example in test_data:
-        
+
         prompts.append(example["prompt"])
         inputs.append(example["input"])
         contexts.append(example["context"])
@@ -215,27 +214,27 @@ def main(args):
         _ids.append(example["_id"])
 
     print("Finish loading model and tokenizer")
-    
+
     model_name = model_path.split("/")[-1]
 
     os.makedirs(os.path.join(args.save_dir, f"{model_name}", args.dataset), exist_ok=True)
 
     fout = open(os.path.join(args.save_dir, f"{model_name}", args.dataset, f"{args.method}.json"), "w")
-     
+
     for i in tqdm(range(0, len(prompts), args.eval_batch_size)):
 
-        
+
         batch_prompts = prompts[i:i+args.eval_batch_size]
         batch_inputs = inputs[i:i+args.eval_batch_size]
         batch_contexts = contexts[i:i+args.eval_batch_size]
         batch_answerss = answerss[i:i+args.eval_batch_size]
         batch_lengths = lengths[i:i+args.eval_batch_size]
-        
+
         batch_datasets = datasets[i:i+args.eval_batch_size]
         batch_languages = languages[i:i+args.eval_batch_size]
         batch_all_classess = all_classess[i:i+args.eval_batch_size]
         batch__ids = _ids[i:i+args.eval_batch_size]
-        
+
         tokenized_prompts = tokenizer(batch_prompts, padding="longest", return_tensors="pt", add_special_tokens=True).to('cuda')
         batch_input_ids = tokenized_prompts.input_ids
         attention_mask = tokenized_prompts.attention_mask
@@ -243,14 +242,14 @@ def main(args):
         if len(batch_input_ids[0]) > model_max_len:
             half = int(model_max_len/2)
             prompt = tokenizer.decode(batch_input_ids[0][:half], skip_special_tokens=True)+tokenizer.decode(batch_input_ids[0][-half:], skip_special_tokens=True)
-            
+
             tokenized_prompts = tokenizer(prompt, padding="longest", return_tensors="pt", add_special_tokens=True).to('cuda')
             batch_input_ids = tokenized_prompts.input_ids
             attention_mask = tokenized_prompts.attention_mask
 
-        
-            
 
+        if manager is not None:
+            manager.set_mode(True)
         context_length = batch_input_ids.shape[-1]
 
         output = model.generate(
@@ -265,23 +264,23 @@ def main(args):
 
 
         batch_outputs =tokenizer.batch_decode([output[0][context_length:]], skip_special_tokens=True)
-        
-        
+
+
         batch_generations = batch_outputs
 
         torch.cuda.empty_cache()
 
         for j in range(args.eval_batch_size):
-            
+
             example = {}
-            
+
             example["prompt"] = batch_prompts[j]
             example["input"] = batch_inputs[j]
             example["context"] = batch_contexts[j]
             example["answers"] = batch_answerss[j]
             example["pred"] = batch_generations[j]
             example["length"] = batch_lengths[j]
-            
+
             example["dataset"] = batch_datasets[j]
             example["language"] = batch_languages[j]
             example["all_classes"] = batch_all_classess[j]
@@ -290,12 +289,10 @@ def main(args):
             fout.write(json.dumps(example) + "\n")
 
 
-
-    
 if __name__ == "__main__":
-    set_seed(42)
     args = parse_args()
-    
+    set_seed(args.seed)
+
     print(f"=== Inference Settings ===")
     print(f"Method:     {args.method}")
     print(f"Model:      {args.model_path}")
@@ -308,61 +305,18 @@ if __name__ == "__main__":
         print(f"Window Config: Sink={args.sink_size}, Window={args.local_window_size}")
 
 
-    print("Loading Base Model...")
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.model_path,
-        trust_remote_code=True,
-        use_fast=True,
-        padding_side="left"
-    )
+    tokenizer, model, manager = load_model(args, hybrid=False)
 
-    tokenizer.padding_side = "left"
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-        tokenizer.pad_token_id = tokenizer.eos_token_id
-
-        
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model_path,
-        dtype='auto',
-        device_map="auto",
-        trust_remote_code=True,
-        low_cpu_mem_usage=True,
-        use_cache=True,
-        attn_implementation=args.attn_implementation,
-    )
-    
-    manager = None
-    
-    if args.method == "echo":
-        print("Applying Echo Patch...")
-        manager = EchoLlamaManager(model, args)
-        
-        if os.path.exists(args.mlp_path):
-            manager.load_mlps(args.mlp_path)
-        else:
-            raise FileNotFoundError(f"MLP Checkpoint not found at: {args.mlp_path}")
-        
-
-        manager.set_mode(True) 
-
-    elif args.method == "base":
-        print("Running in Base Model (Vanilla) mode. No patches applied.")
-    
-    if manager:
-        manager.to(model.device)
-    
-    model.eval()
-    
     save_dir = args.save_dir
     datasets = args.datasets
-            
+    data_file = args.data_file
+
     for idx, dataset in enumerate(datasets):
-        
+
         print(f"Working on dataset {dataset} - {idx}/{len(datasets)}")
-        
+
         args.dataset = dataset
-        
-        args.data_file = f"data/LongBench/{args.dataset}.jsonl"
-        
+
+        args.data_file = data_file or os.path.join(args.data_dir, f"{dataset}.jsonl")
+
         main(args)

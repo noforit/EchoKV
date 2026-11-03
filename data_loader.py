@@ -1,4 +1,3 @@
-# data_loader.py
 import json
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -8,17 +7,17 @@ from tqdm import tqdm
 def get_datasets(tokenizer, args):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-        
+
     print(f"Loading data from {args.dataset_path} ...")
     with open(args.dataset_path, 'r', encoding='utf-8') as f:
         data = json.load(f)
-    
+
     print(f"Loaded {len(data)} samples from {args.dataset_path}")
 
     datasets = []
 
     datalen = []
-    
+
     for item in tqdm(data, desc="Processing samples"):
 
         instruction = item.get("instruction", "")
@@ -39,28 +38,24 @@ def get_datasets(tokenizer, args):
 
         prompts = tokenizer.apply_chat_template(
             messages,
-            tokenize=False, 
+            tokenize=False,
             add_generation_prompt=False,
         )
 
-        # tokens = tokenizer.encode(prompts, add_special_tokens=False)
-        # datalen.append(len(tokens))
 
         datasets.append(prompts)
 
-    # avg = sum(datalen[:1000]) / len(datalen[:1000])
-    # print(avg)
 
     return datasets
 
 def get_datasets_c4(tokenizer, args):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-        
+
     print(f"Loading data from {args.dataset_path} ...")
     with open(args.dataset_path, 'r', encoding='utf-8') as f:
         data = json.load(f)
-    
+
     print(f"Loaded {len(data)} samples from {args.dataset_path}")
 
     datasets = []
@@ -85,16 +80,12 @@ def get_datasets_c4(tokenizer, args):
 
         prompts = tokenizer.apply_chat_template(
             messages,
-            tokenize=False, 
+            tokenize=False,
             add_generation_prompt=False,
         )
 
-        # tokens = tokenizer.encode(prompts, add_special_tokens=False)
-        # datalen.append(len(tokens))
 
         datasets.append(prompts)
-    
-    # avg = sum(datalen[:1000]) / len(datalen[:1000])
-    # print(avg)
+
 
     return datasets

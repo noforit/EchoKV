@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.venv/
+training_results*/
+longbench_results*/
+runs/
+outputs/
+third_party/
+data/ruler/
+data/LongBench/*.jsonl
